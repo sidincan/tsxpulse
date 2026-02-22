@@ -2,14 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
-from datetime import datetime, timedelta
-import requests
-import os
+import ta
+from datetime import datetime
 
 app = FastAPI()
 
-# Allow your Lovable frontend to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,27 +25,27 @@ def compute_signal(ticker: str) -> dict:
     df = yf.download(f"{ticker}.TO", period="1y", interval="1d", progress=False)
     if len(df) < 210:
         return None
-    
-    # Flatten multi-level columns if present
+
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
-    
+
     close = df['Close']
     volume = df['Volume']
     high = df['High']
     low = df['Low']
 
     # MACD
-    macd_df = ta.macd(close, fast=9, slow=21, signal=9)
-    hist_col = [c for c in macd_df.columns if 'MACDh' in c][0]
-    hist = macd_df[hist_col]
+    macd = ta.trend.MACD(close, window_slow=21, window_fast=9, window_sign=9)
+    hist = macd.macd_diff()
     tm_score = 1 if (hist.iloc[-1] > 0 and hist.iloc[-1] > hist.iloc[-2]) else 0
 
-    # RSI + SMAs
-    rsi_series = ta.rsi(close, length=14)
-    sma50 = ta.sma(close, length=50)
-    sma200 = ta.sma(close, length=200)
+    # RSI
+    rsi_series = ta.momentum.RSIIndicator(close, window=14).rsi()
     rsi_val = float(rsi_series.iloc[-1])
+
+    # SMAs
+    sma50 = close.rolling(50).mean()
+    sma200 = close.rolling(200).mean()
     current_price = float(close.iloc[-1])
 
     pq_score = 1 if (40 <= rsi_val <= 60 and current_price > float(sma50.iloc[-1])) else 0
@@ -56,17 +53,18 @@ def compute_signal(ticker: str) -> dict:
     # Volume + OBV
     vol_sma = volume.rolling(20).mean()
     vol_ratio = float(volume.iloc[-1] / vol_sma.iloc[-1])
-    obv = ta.obv(close, volume)
+    obv = ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume()
     obv_slope = float(obv.iloc[-1] - obv.iloc[-6])
     vc_score = 1 if (vol_ratio < 0.8 and obv_slope > 0) else 0
 
-    cms = round((tm_score * 0.45) + (pq_score * 0.35) + (vc_score * 0.20), 3)
+    # ATR
+    atr = float(ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range().iloc[-1])
 
+    cms = round((tm_score * 0.45) + (pq_score * 0.35) + (vc_score * 0.20), 3)
     above_200 = current_price > float(sma200.iloc[-1])
     confirmation = current_price > float(close.iloc[-2])
     entry_signal = cms >= 0.80 and above_200 and confirmation and rsi_val < 70
 
-    atr = float(ta.atr(high, low, close, length=14).iloc[-1])
     stop = round(max(current_price - 2.0 * atr, current_price * 0.93), 2)
 
     return {
@@ -95,7 +93,6 @@ def scan_all():
                 results.append(signal)
         except Exception as e:
             print(f"Error {ticker}: {e}")
-    
     results.sort(key=lambda x: x["cms"], reverse=True)
     return {"signals": results, "scanned_at": datetime.now().isoformat()}
 
