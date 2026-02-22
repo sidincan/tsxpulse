@@ -1,7 +1,7 @@
 fastapi
 uvicorn
-yfinance==0.2.36
-pandas==2.2.2
-numpy==1.26.4
-ta
 requests
+yfinance
+pandas
+numpy
+ta
