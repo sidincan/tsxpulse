@@ -401,7 +401,7 @@ def compute_signal(stock: dict, idx: int = 0, total: int = 0) -> dict:
         # ADX — measures trend strength (not direction)
         # ADX > 25 = strong directional trend, < 20 = choppy/sideways
         adx_val = float(ta.trend.ADXIndicator(high, low, close, window=14).adx().iloc[-1])
-        adx_score = 1 if adx_val >= 25 else 0
+        adx_score = 1 if adx_val >= 20 else 0
 
         # CMS Score — ADX replaces volume as 4th signal, reweighted
         cms       = round((tm_score * 0.40) + (pq_score * 0.30) + (vc_score * 0.15) + (adx_score * 0.15), 3)
@@ -417,7 +417,7 @@ def compute_signal(stock: dict, idx: int = 0, total: int = 0) -> dict:
             and above_200
             and confirm
             and rsi_val < 70
-            and adx_val >= 25          # trend must be strong, not choppy
+            and adx_val >= 20          # trend must be directional, filters flat/choppy
             and not earnings_info["near_earnings"]
         )
 
