@@ -534,31 +534,39 @@ def debug_ticker(ticker: str, market: str = "NYSE"):
 def track_signal(ticker: str, signal_date: str, market: str = "TSX"):
     try:
         yf_ticker = f"{ticker}.TO" if market == "TSX" else ticker
-        df = yf.download(yf_ticker, period="3mo", interval="1d",
-                         progress=False, auto_adjust=True)
-        if isinstance(df.columns, pd.MultiIndex):
-            level_0 = [str(v) for v in df.columns.get_level_values(0)]
-            df.columns = df.columns.droplevel(1) if "Close" in level_0 else df.columns.droplevel(0)
-        df.columns = [str(c) for c in df.columns]
-        df = df[~df.index.duplicated(keep="last")]
+
+        # Use download_single — same clean sequential download as the scan
+        # This prevents data bleeding between simultaneous track requests
+        df = download_single(yf_ticker)
+
+        if df.empty:
+            return {"error": f"No data returned for {ticker}"}
+
         df.index = pd.to_datetime(df.index).tz_localize(None)
         signal_dt = pd.to_datetime(signal_date)
         df_after = df[df.index >= signal_dt].head(15)
+
         if df_after.empty:
             return {"error": "No data after signal date"}
+
         days = []
         for i, (date, row) in enumerate(df_after.iterrows()):
+            d1_close = round(float(row["Close"]), 2)
             days.append({
                 "day":    i + 1,
                 "date":   date.strftime("%Y-%m-%d"),
                 "open":   round(float(row["Open"]), 2),
-                "close":  round(float(row["Close"]), 2),
+                "close":  d1_close,
                 "high":   round(float(row["High"]), 2),
                 "low":    round(float(row["Low"]), 2),
                 "midday": round((float(row["High"]) + float(row["Low"])) / 2, 2),
             })
+
+        first_close = days[0]["close"] if days else "N/A"
+        print(f"TRACK {ticker}: {len(days)} days from {signal_date}, D1 close=${first_close}")
         return {"ticker": ticker, "signal_date": signal_date, "days": days}
     except Exception as e:
+        print(f"Track error {ticker}: {e}")
         return {"error": str(e)}
 
 @app.get("/health")
