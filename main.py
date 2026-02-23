@@ -338,6 +338,34 @@ def is_near_earnings(ticker: str, market: str, days_buffer: int = 5) -> dict:
 
 # ── SIGNAL COMPUTATION ────────────────────────────────────────────────────────
 
+def safe_download(yf_ticker: str, retries: int = 3) -> pd.DataFrame:
+    """
+    Downloads with retry logic to handle yfinance rate limiting.
+    Parallel threads often trigger rate limits causing empty returns.
+    """
+    import time
+    for attempt in range(retries):
+        try:
+            df = yf.download(
+                yf_ticker,
+                period="1y",
+                interval="1d",
+                progress=False,
+                auto_adjust=True
+            )
+            if len(df) >= 50:
+                return df
+            wait = (attempt + 1) * 2
+            print(f"RETRY {yf_ticker} attempt {attempt+1}: only {len(df)} rows, waiting {wait}s")
+            time.sleep(wait)
+        except Exception as e:
+            wait = (attempt + 1) * 2
+            print(f"RETRY {yf_ticker} attempt {attempt+1} error: {e}, waiting {wait}s")
+            time.sleep(wait)
+    print(f"FAILED {yf_ticker}: all {retries} attempts exhausted")
+    return pd.DataFrame()
+
+
 def compute_signal(stock: dict) -> dict:
     ticker   = stock["ticker"]
     market   = stock["market"]
@@ -347,20 +375,44 @@ def compute_signal(stock: dict) -> dict:
     yf_ticker = f"{ticker}.TO" if market == "TSX" else ticker
 
     try:
-        df = yf.download(yf_ticker, period="1y", interval="1d", progress=False)
+        df = safe_download(yf_ticker)
 
-        # FIXED: lowered from 210 to 200 so NVDA and others don't get dropped
         if len(df) < 200:
             print(f"SKIP {ticker}: only {len(df)} rows")
             return None
 
+        # Bulletproof MultiIndex fix
+        # yfinance can return (field, ticker) or (ticker, field) — handle both
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+            level_0 = [str(v) for v in df.columns.get_level_values(0)]
+            level_1 = [str(v) for v in df.columns.get_level_values(1)]
+            if "Close" in level_0:
+                df.columns = df.columns.droplevel(1)
+            elif "Close" in level_1:
+                df.columns = df.columns.droplevel(0)
+            else:
+                df.columns = [str(c[0]) for c in df.columns]
 
-        close  = df['Close']
-        volume = df['Volume']
-        high   = df['High']
-        low    = df['Low']
+        df.columns = [str(c) for c in df.columns]
+
+        if "Close" not in df.columns:
+            print(f"SKIP {ticker}: no Close column. Got: {df.columns.tolist()}")
+            return None
+
+        close  = df["Close"].squeeze()
+        volume = df["Volume"].squeeze()
+        high   = df["High"].squeeze()
+        low    = df["Low"].squeeze()
+
+        mask   = close.notna() & volume.notna() & high.notna() & low.notna()
+        close  = close[mask]
+        volume = volume[mask]
+        high   = high[mask]
+        low    = low[mask]
+
+        if len(close) < 200:
+            print(f"SKIP {ticker}: only {len(close)} clean rows after NaN drop")
+            return None
 
         # Signal 1: MACD Momentum
         macd_ind = ta.trend.MACD(close, window_slow=21, window_fast=9, window_sign=9)
@@ -435,7 +487,7 @@ def compute_signal(stock: dict) -> dict:
 
 # ── PARALLEL SCAN ENGINE ──────────────────────────────────────────────────────
 
-def parallel_scan(universe: list, max_workers: int = 12) -> list:
+def parallel_scan(universe: list, max_workers: int = 6) -> list:
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(compute_signal, stock): stock for stock in universe}
@@ -494,9 +546,13 @@ def debug_ticker(ticker: str, market: str = "NYSE"):
     """Check exactly why a stock might be missing from scan results"""
     try:
         yf_ticker = f"{ticker}.TO" if market == "TSX" else ticker
-        df = yf.download(yf_ticker, period="1y", interval="1d", progress=False)
+        df = safe_download(yf_ticker)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+            level_0 = [str(v) for v in df.columns.get_level_values(0)]
+            if "Close" in level_0:
+                df.columns = df.columns.droplevel(1)
+            else:
+                df.columns = df.columns.droplevel(0)
         in_universe = any(s["ticker"] == ticker.upper() for s in FULL_UNIVERSE)
         return {
             "ticker":             ticker,
@@ -514,9 +570,13 @@ def debug_ticker(ticker: str, market: str = "NYSE"):
 def track_signal(ticker: str, signal_date: str, market: str = "TSX"):
     try:
         yf_ticker = f"{ticker}.TO" if market == "TSX" else ticker
-        df = yf.download(yf_ticker, period="3mo", interval="1d", progress=False)
+        df = yf.download(yf_ticker, period="3mo", interval="1d", progress=False, auto_adjust=True)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+            level_0 = [str(v) for v in df.columns.get_level_values(0)]
+            if "Close" in level_0:
+                df.columns = df.columns.droplevel(1)
+            else:
+                df.columns = df.columns.droplevel(0)
         df.index = pd.to_datetime(df.index).tz_localize(None)
         signal_dt = pd.to_datetime(signal_date)
         df_after = df[df.index >= signal_dt].head(15)
