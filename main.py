@@ -338,10 +338,9 @@ def is_near_earnings(ticker: str, market: str, days_buffer: int = 5) -> dict:
 
 # ── SIGNAL COMPUTATION ────────────────────────────────────────────────────────
 
-def safe_download(yf_ticker: str, retries: int = 3) -> pd.DataFrame:
+def safe_download(yf_ticker: str, retries: int = 2) -> pd.DataFrame:
     """
-    Downloads with retry logic to handle yfinance rate limiting.
-    Parallel threads often trigger rate limits causing empty returns.
+    Downloads with one quick retry. Fast failure preferred over long waits.
     """
     import time
     for attempt in range(retries):
@@ -351,18 +350,17 @@ def safe_download(yf_ticker: str, retries: int = 3) -> pd.DataFrame:
                 period="1y",
                 interval="1d",
                 progress=False,
-                auto_adjust=True
+                auto_adjust=True,
+                timeout=10
             )
             if len(df) >= 50:
                 return df
-            wait = (attempt + 1) * 2
-            print(f"RETRY {yf_ticker} attempt {attempt+1}: only {len(df)} rows, waiting {wait}s")
-            time.sleep(wait)
+            if attempt < retries - 1:
+                time.sleep(1)
         except Exception as e:
-            wait = (attempt + 1) * 2
-            print(f"RETRY {yf_ticker} attempt {attempt+1} error: {e}, waiting {wait}s")
-            time.sleep(wait)
-    print(f"FAILED {yf_ticker}: all {retries} attempts exhausted")
+            print(f"Download error {yf_ticker}: {e}")
+            if attempt < retries - 1:
+                time.sleep(1)
     return pd.DataFrame()
 
 
@@ -489,16 +487,23 @@ def compute_signal(stock: dict) -> dict:
 
 def parallel_scan(universe: list, max_workers: int = 6) -> list:
     results = []
+    total = len(universe)
+    completed = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(compute_signal, stock): stock for stock in universe}
         for future in as_completed(futures):
+            stock = futures[future]
+            completed += 1
             try:
-                result = future.result(timeout=30)
+                result = future.result(timeout=15)
                 if result:
                     results.append(result)
+                    print(f"OK {stock['ticker']} ({completed}/{total}) CMS={result['cms']}")
+                else:
+                    print(f"SKIP {stock['ticker']} ({completed}/{total})")
             except Exception as e:
-                stock = futures[future]
-                print(f"Parallel error {stock['ticker']}: {e}")
+                print(f"ERROR {stock['ticker']} ({completed}/{total}): {e}")
+    print(f"Scan complete: {len(results)}/{total} stocks processed")
     return sorted(results, key=lambda x: x["cms"], reverse=True)
 
 
