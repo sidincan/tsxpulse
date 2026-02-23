@@ -16,7 +16,6 @@ app.add_middleware(
 )
 
 # ── UNIVERSE ──────────────────────────────────────────────────────────────────
-# Top 15 per sector, both markets
 
 TSX_UNIVERSE = [
     # Financials (15)
@@ -223,13 +222,13 @@ US_UNIVERSE = [
     {"ticker":"HD",   "market":"NYSE","currency":"USD","sector":"Consumer"},
     {"ticker":"LOW",  "market":"NYSE","currency":"USD","sector":"Consumer"},
     {"ticker":"TGT",  "market":"NYSE","currency":"USD","sector":"Consumer"},
-    {"ticker":"AMZN", "market":"NYSE","currency":"USD","sector":"Consumer"},
     {"ticker":"PG",   "market":"NYSE","currency":"USD","sector":"Consumer"},
     {"ticker":"KO",   "market":"NYSE","currency":"USD","sector":"Consumer"},
     {"ticker":"PEP",  "market":"NYSE","currency":"USD","sector":"Consumer"},
     {"ticker":"PM",   "market":"NYSE","currency":"USD","sector":"Consumer"},
     {"ticker":"CL",   "market":"NYSE","currency":"USD","sector":"Consumer"},
     {"ticker":"MDLZ", "market":"NYSE","currency":"USD","sector":"Consumer"},
+    {"ticker":"EL",   "market":"NYSE","currency":"USD","sector":"Consumer"},
     # Industrials (15)
     {"ticker":"CAT",  "market":"NYSE","currency":"USD","sector":"Industrials"},
     {"ticker":"DE",   "market":"NYSE","currency":"USD","sector":"Industrials"},
@@ -273,12 +272,12 @@ US_UNIVERSE = [
     {"ticker":"ED",   "market":"NYSE","currency":"USD","sector":"Utilities"},
     {"ticker":"ETR",  "market":"NYSE","currency":"USD","sector":"Utilities"},
     {"ticker":"FE",   "market":"NYSE","currency":"USD","sector":"Utilities"},
-    {"ticker":"PPL",  "market":"NYSE","currency":"USD","sector":"Utilities"},
     {"ticker":"EIX",  "market":"NYSE","currency":"USD","sector":"Utilities"},
     {"ticker":"ES",   "market":"NYSE","currency":"USD","sector":"Utilities"},
     {"ticker":"AWK",  "market":"NYSE","currency":"USD","sector":"Utilities"},
     {"ticker":"WEC",  "market":"NYSE","currency":"USD","sector":"Utilities"},
-    # ETFs (sector context)
+    {"ticker":"AES",  "market":"NYSE","currency":"USD","sector":"Utilities"},
+    # ETFs
     {"ticker":"SPY",  "market":"NYSE","currency":"USD","sector":"ETF"},
     {"ticker":"QQQ",  "market":"NYSE","currency":"USD","sector":"ETF"},
     {"ticker":"XLF",  "market":"NYSE","currency":"USD","sector":"ETF"},
@@ -291,7 +290,8 @@ US_UNIVERSE = [
     {"ticker":"XLK",  "market":"NYSE","currency":"USD","sector":"ETF"},
 ]
 
-# Deduplicate (AMZN appears in both Tech and Consumer)
+# ── DEDUPLICATE ───────────────────────────────────────────────────────────────
+# First deduplicate US universe on its own
 seen = set()
 _deduped = []
 for s in US_UNIVERSE:
@@ -300,7 +300,14 @@ for s in US_UNIVERSE:
         _deduped.append(s)
 US_UNIVERSE = _deduped
 
-FULL_UNIVERSE = TSX_UNIVERSE + US_UNIVERSE
+# Then deduplicate the full combined universe
+seen2 = set()
+_final = []
+for s in TSX_UNIVERSE + US_UNIVERSE:
+    if s["ticker"] not in seen2:
+        seen2.add(s["ticker"])
+        _final.append(s)
+FULL_UNIVERSE = _final
 
 
 # ── EARNINGS FILTER ───────────────────────────────────────────────────────────
@@ -341,8 +348,12 @@ def compute_signal(stock: dict) -> dict:
 
     try:
         df = yf.download(yf_ticker, period="1y", interval="1d", progress=False)
-        if len(df) < 210:
+
+        # FIXED: lowered from 210 to 200 so NVDA and others don't get dropped
+        if len(df) < 200:
+            print(f"SKIP {ticker}: only {len(df)} rows")
             return None
+
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
 
@@ -351,10 +362,12 @@ def compute_signal(stock: dict) -> dict:
         high   = df['High']
         low    = df['Low']
 
+        # Signal 1: MACD Momentum
         macd_ind = ta.trend.MACD(close, window_slow=21, window_fast=9, window_sign=9)
         hist     = macd_ind.macd_diff()
         tm_score = 1 if (hist.iloc[-1] > 0 and hist.iloc[-1] > hist.iloc[-2]) else 0
 
+        # Signal 2: RSI + SMA Pullback Quality
         rsi_series    = ta.momentum.RSIIndicator(close, window=14).rsi()
         rsi_val       = float(rsi_series.iloc[-1])
         sma50         = close.rolling(50).mean()
@@ -362,23 +375,28 @@ def compute_signal(stock: dict) -> dict:
         current_price = float(close.iloc[-1])
         pq_score = 1 if (40 <= rsi_val <= 60 and current_price > float(sma50.iloc[-1])) else 0
 
+        # Signal 3: Volume + OBV
         vol_sma   = volume.rolling(20).mean()
         vol_ratio = float(volume.iloc[-1] / vol_sma.iloc[-1])
         obv       = ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume()
         obv_slope = float(obv.iloc[-1] - obv.iloc[-6])
         vc_score  = 1 if (vol_ratio < 0.8 and obv_slope > 0) else 0
 
+        # ATR for stop calculation
         atr = float(ta.volatility.AverageTrueRange(
             high, low, close, window=14).average_true_range().iloc[-1])
 
+        # CMS Score
         cms       = round((tm_score * 0.45) + (pq_score * 0.35) + (vc_score * 0.20), 3)
         above_200 = current_price > float(sma200.iloc[-1])
         confirm   = current_price > float(close.iloc[-2])
 
+        # Only check earnings for stocks with a meaningful CMS score
         earnings_info = {"near_earnings": False, "earnings_date": None}
         if cms >= 0.60:
             earnings_info = is_near_earnings(ticker, market)
 
+        # Entry signal — blocked if near earnings
         entry_signal = (
             cms >= 0.80
             and above_200
@@ -418,10 +436,6 @@ def compute_signal(stock: dict) -> dict:
 # ── PARALLEL SCAN ENGINE ──────────────────────────────────────────────────────
 
 def parallel_scan(universe: list, max_workers: int = 12) -> list:
-    """
-    Scans stocks in parallel using a thread pool.
-    12 workers reduces scan time by ~10x vs sequential.
-    """
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(compute_signal, stock): stock for stock in universe}
@@ -442,10 +456,10 @@ def parallel_scan(universe: list, max_workers: int = 12) -> list:
 def scan_all():
     results = parallel_scan(FULL_UNIVERSE)
     return {
-        "signals": results,
-        "scanned_at": datetime.now().isoformat(),
-        "total": len(results),
-        "buy_signals": sum(1 for r in results if r["entry_signal"]),
+        "signals":       results,
+        "scanned_at":    datetime.now().isoformat(),
+        "total":         len(results),
+        "buy_signals":   sum(1 for r in results if r["entry_signal"]),
         "universe_size": len(FULL_UNIVERSE)
     }
 
@@ -475,6 +489,27 @@ def get_signal(ticker: str):
             return result if result else {"error": "Insufficient data"}
     return {"error": "Ticker not in universe"}
 
+@app.get("/debug/{ticker}")
+def debug_ticker(ticker: str, market: str = "NYSE"):
+    """Check exactly why a stock might be missing from scan results"""
+    try:
+        yf_ticker = f"{ticker}.TO" if market == "TSX" else ticker
+        df = yf.download(yf_ticker, period="1y", interval="1d", progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+        in_universe = any(s["ticker"] == ticker.upper() for s in FULL_UNIVERSE)
+        return {
+            "ticker":             ticker,
+            "yf_ticker":          yf_ticker,
+            "in_universe":        in_universe,
+            "rows_downloaded":    len(df),
+            "passes_data_check":  len(df) >= 200,
+            "last_close":         round(float(df["Close"].iloc[-1]), 2) if len(df) > 0 else None,
+            "last_date":          str(df.index[-1]) if len(df) > 0 else None
+        }
+    except Exception as e:
+        return {"ticker": ticker, "error": str(e)}
+
 @app.get("/track/{ticker}/{signal_date}")
 def track_signal(ticker: str, signal_date: str, market: str = "TSX"):
     try:
@@ -490,12 +525,12 @@ def track_signal(ticker: str, signal_date: str, market: str = "TSX"):
         days = []
         for i, (date, row) in enumerate(df_after.iterrows()):
             days.append({
-                "day": i + 1,
-                "date": date.strftime("%Y-%m-%d"),
-                "open": round(float(row["Open"]), 2),
-                "close": round(float(row["Close"]), 2),
-                "high": round(float(row["High"]), 2),
-                "low": round(float(row["Low"]), 2),
+                "day":    i + 1,
+                "date":   date.strftime("%Y-%m-%d"),
+                "open":   round(float(row["Open"]), 2),
+                "close":  round(float(row["Close"]), 2),
+                "high":   round(float(row["High"]), 2),
+                "low":    round(float(row["Low"]), 2),
                 "midday": round((float(row["High"]) + float(row["Low"])) / 2, 2),
             })
         return {"ticker": ticker, "signal_date": signal_date, "days": days}
@@ -505,9 +540,9 @@ def track_signal(ticker: str, signal_date: str, market: str = "TSX"):
 @app.get("/health")
 def health():
     return {
-        "status": "ok",
-        "time": datetime.now().isoformat(),
-        "tsx_universe": len(TSX_UNIVERSE),
-        "us_universe": len(US_UNIVERSE),
+        "status":         "ok",
+        "time":           datetime.now().isoformat(),
+        "tsx_universe":   len(TSX_UNIVERSE),
+        "us_universe":    len(US_UNIVERSE),
         "total_universe": len(FULL_UNIVERSE)
     }
