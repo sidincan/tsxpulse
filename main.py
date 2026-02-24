@@ -1,10 +1,13 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
 import ta
 from datetime import datetime
 import time
+import anthropic
+import os
 
 app = FastAPI()
 
@@ -568,6 +571,75 @@ def track_signal(ticker: str, signal_date: str, market: str = "TSX"):
     except Exception as e:
         print(f"Track error {ticker}: {e}")
         return {"error": str(e)}
+
+
+# ── NEWS SYNTHESIS PROXY ──────────────────────────────────────────────────────
+# Proxies Claude API calls from the browser — needed because Anthropic blocks
+# direct browser requests (CORS). Render acts as the middleman.
+
+class SynthesizeRequest(BaseModel):
+    ticker: str
+    price: float
+    currency: str
+    signal_type: str
+    headlines: list
+
+@app.post("/synthesize")
+async def synthesize_news(req: SynthesizeRequest):
+    try:
+        headline_text = ""
+        if req.headlines:
+            lines = []
+            for i, h in enumerate(req.headlines, 1):
+                lines.append(f"{i}. [{h.get('time','')} {h.get('source','')}] {h.get('headline','')}")
+            headline_text = "\n".join(lines)
+        else:
+            headline_text = "No news headlines found in the last 24 hours."
+
+        prompt = f"""You are a professional equity trading analyst. Assess whether overnight news supports or undermines a momentum buy signal.
+
+Stock: {req.ticker}
+Currency: {req.currency}
+Current Price: {req.price}
+Signal Type: {req.signal_type}
+
+Overnight news headlines (last 24 hours):
+{headline_text}
+
+Respond in this exact JSON format with no markdown:
+{{
+  "verdict": "PROCEED" or "CAUTION" or "AVOID" or "NEUTRAL",
+  "brief": "2-3 sentence synthesis. What happened overnight, how it affects this trade, and what to watch at market open. Be specific and actionable.",
+  "key_risk": "One sentence on the main risk to the trade today, or null if none."
+}}
+
+Rules:
+- PROCEED = news is supportive or neutral, signal intact
+- CAUTION = mixed signals, wait for open confirmation
+- AVOID = negative news materially changes risk/reward today
+- NEUTRAL = no relevant news, assess on technicals alone
+- Keep the brief under 60 words, direct and actionable"""
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return {"verdict": "NEUTRAL", "brief": "News synthesis unavailable — ANTHROPIC_API_KEY not set on server.", "key_risk": None}
+
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        text = message.content[0].text
+        import json, re
+        clean = re.sub(r"```json|```", "", text).strip()
+        result = json.loads(clean)
+        return result
+
+    except Exception as e:
+        print(f"Synthesis error for {req.ticker}: {e}")
+        return {"verdict": "NEUTRAL", "brief": f"Unable to synthesize news at this time.", "key_risk": None}
 
 @app.get("/health")
 def health():
