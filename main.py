@@ -389,6 +389,14 @@ def compute_signal(stock: dict, idx: int = 0, total: int = 0) -> dict:
         sma50         = close.rolling(50).mean()
         sma200        = close.rolling(200).mean()
         current_price = float(close.iloc[-1])
+
+        # Price sanity: current price must be within 20% of 20-day median
+        # Catches cases where yfinance returns a stale or split-adjusted outlier
+        recent_median = float(close.iloc[-20:].median())
+        if current_price < recent_median * 0.80 or current_price > recent_median * 1.20:
+            print(f"PRICE OUTLIER {ticker} ({idx}/{total}): current=${current_price:.2f} vs 20d median=${recent_median:.2f} — skipping")
+            return None
+
         pq_score = 1 if (40 <= rsi_val <= 60 and current_price > float(sma50.iloc[-1])) else 0
 
         # Signal 3: Volume + OBV
