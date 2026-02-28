@@ -1,8 +1,0 @@
-fastapi
-uvicorn
-requests
-yfinance
-pandas
-numpy
-ta
-anthropic
