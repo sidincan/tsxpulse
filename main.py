@@ -67,7 +67,7 @@ TSX_UNIVERSE = [
     {"ticker":"CS",   "market":"TSX","currency":"CAD","sector":"Materials"},
     {"ticker":"OR",   "market":"TSX","currency":"CAD","sector":"Materials"},
     {"ticker":"CIA",  "market":"TSX","currency":"CAD","sector":"Materials"},
-    {"ticker":"NGT",  "market":"TSX","currency":"CAD","sector":"Materials"},
+    {"ticker":"WDO",  "market":"TSX","currency":"CAD","sector":"Materials"},
     {"ticker":"EDV",  "market":"TSX","currency":"CAD","sector":"Materials"},
     {"ticker":"DPM",  "market":"TSX","currency":"CAD","sector":"Materials"},
     # Technology
@@ -79,7 +79,7 @@ TSX_UNIVERSE = [
     {"ticker":"LSPD", "market":"TSX","currency":"CAD","sector":"Technology"},
     {"ticker":"TOI",  "market":"TSX","currency":"CAD","sector":"Technology"},
     {"ticker":"DSGX", "market":"TSX","currency":"CAD","sector":"Technology"},
-    {"ticker":"BBTV", "market":"TSX","currency":"CAD","sector":"Technology"},
+    {"ticker":"OTEX", "market":"TSX","currency":"CAD","sector":"Technology"},
     {"ticker":"GIB",  "market":"TSX","currency":"CAD","sector":"Technology"},
     # Industrials
     {"ticker":"CP",   "market":"TSX","currency":"CAD","sector":"Industrials"},
@@ -88,7 +88,6 @@ TSX_UNIVERSE = [
     {"ticker":"TRI",  "market":"TSX","currency":"CAD","sector":"Industrials"},
     {"ticker":"WSP",  "market":"TSX","currency":"CAD","sector":"Industrials"},
     {"ticker":"STN",  "market":"TSX","currency":"CAD","sector":"Industrials"},
-    {"ticker":"TFI",  "market":"TSX","currency":"CAD","sector":"Industrials"},
     {"ticker":"BYD",  "market":"TSX","currency":"CAD","sector":"Industrials"},
     {"ticker":"GFL",  "market":"TSX","currency":"CAD","sector":"Industrials"},
     {"ticker":"WCN",  "market":"TSX","currency":"CAD","sector":"Industrials"},
@@ -280,45 +279,56 @@ FULL_UNIVERSE = dedup(TSX_UNIVERSE + US_UNIVERSE)
 
 def download_single(yf_ticker: str) -> pd.DataFrame:
     """
-    Downloads one stock sequentially. No parallel calls to yfinance.
-    This is the only reliable way to get clean 1D data per stock.
+    Downloads one stock sequentially. Retries once with 3s backoff on
+    rate limit or empty response.
     """
-    try:
-        df = yf.download(
-            yf_ticker,
-            period="1y",
-            interval="1d",
-            progress=False,
-            auto_adjust=True,
-            group_by="ticker"
-        )
-        if df is None or df.empty:
+    for attempt in range(2):
+        try:
+            df = yf.download(
+                yf_ticker,
+                period="1y",
+                interval="1d",
+                progress=False,
+                auto_adjust=True,
+                group_by="ticker"
+            )
+            if df is None or df.empty:
+                if attempt == 0:
+                    time.sleep(3)
+                    continue
+                return pd.DataFrame()
+
+            # Flatten MultiIndex if present
+            if isinstance(df.columns, pd.MultiIndex):
+                level_0 = [str(v) for v in df.columns.get_level_values(0)]
+                level_1 = [str(v) for v in df.columns.get_level_values(1)]
+                if "Close" in level_0:
+                    df.columns = df.columns.droplevel(1)
+                elif "Close" in level_1:
+                    df.columns = df.columns.droplevel(0)
+                else:
+                    df.columns = [str(c[0]) for c in df.columns]
+
+            df.columns = [str(c) for c in df.columns]
+
+            if "Close" not in df.columns:
+                if attempt == 0:
+                    time.sleep(3)
+                    continue
+                return pd.DataFrame()
+
+            df = df[~df.index.duplicated(keep="last")]
+            df = df.dropna(subset=["Close", "High", "Low", "Volume"])
+            return df
+
+        except Exception as e:
+            print(f"Download error {yf_ticker} (attempt {attempt+1}): {e}")
+            if attempt == 0:
+                time.sleep(3)
+                continue
             return pd.DataFrame()
 
-        # Flatten MultiIndex if present
-        if isinstance(df.columns, pd.MultiIndex):
-            level_0 = [str(v) for v in df.columns.get_level_values(0)]
-            level_1 = [str(v) for v in df.columns.get_level_values(1)]
-            if "Close" in level_0:
-                df.columns = df.columns.droplevel(1)
-            elif "Close" in level_1:
-                df.columns = df.columns.droplevel(0)
-            else:
-                df.columns = [str(c[0]) for c in df.columns]
-
-        df.columns = [str(c) for c in df.columns]
-
-        if "Close" not in df.columns:
-            return pd.DataFrame()
-
-        df = df[~df.index.duplicated(keep="last")]
-        df = df.dropna(subset=["Close", "High", "Low", "Volume"])
-
-        return df
-
-    except Exception as e:
-        print(f"Download error {yf_ticker}: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 
 # ── EARNINGS FILTER ───────────────────────────────────────────────────────────
