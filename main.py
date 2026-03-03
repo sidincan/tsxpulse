@@ -283,7 +283,7 @@ def download_single(yf_ticker: str) -> pd.DataFrame:
     Downloads one stock sequentially. No parallel calls to yfinance.
     This is the only reliable way to get clean 1D data per stock.
     """
-    for attempt in range(3):  # retry up to 3x on rate limit errors
+    for attempt in range(3):  # retry up to 3x on rate limit
         try:
             df = yf.download(
                 yf_ticker,
@@ -291,49 +291,43 @@ def download_single(yf_ticker: str) -> pd.DataFrame:
                 interval="1d",
                 progress=False,
                 auto_adjust=True,
-                group_by="ticker"   # forces clean single-stock format
+                group_by="ticker"
             )
             if df is None or df.empty:
                 return pd.DataFrame()
 
-        # Flatten MultiIndex if present
-        if isinstance(df.columns, pd.MultiIndex):
-            # With group_by="ticker", format is (field, ticker) — drop ticker level
-            level_0 = [str(v) for v in df.columns.get_level_values(0)]
-            level_1 = [str(v) for v in df.columns.get_level_values(1)]
-            if "Close" in level_0:
-                df.columns = df.columns.droplevel(1)
-            elif "Close" in level_1:
-                df.columns = df.columns.droplevel(0)
-            else:
-                # last resort
-                df.columns = [str(c[0]) for c in df.columns]
+            # Flatten MultiIndex if present
+            if isinstance(df.columns, pd.MultiIndex):
+                level_0 = [str(v) for v in df.columns.get_level_values(0)]
+                level_1 = [str(v) for v in df.columns.get_level_values(1)]
+                if "Close" in level_0:
+                    df.columns = df.columns.droplevel(1)
+                elif "Close" in level_1:
+                    df.columns = df.columns.droplevel(0)
+                else:
+                    df.columns = [str(c[0]) for c in df.columns]
 
-        df.columns = [str(c) for c in df.columns]
+            df.columns = [str(c) for c in df.columns]
 
-        if "Close" not in df.columns:
-            return pd.DataFrame()
+            if "Close" not in df.columns:
+                return pd.DataFrame()
 
-        # Remove duplicate index entries (cause "cannot reindex" errors)
-        df = df[~df.index.duplicated(keep="last")]
+            df = df[~df.index.duplicated(keep="last")]
+            df = df.dropna(subset=["Close", "High", "Low", "Volume"])
 
-        # Drop NaN rows
-        df = df.dropna(subset=["Close", "High", "Low", "Volume"])
-
-        return df
+            return df
 
         except Exception as e:
             if "rate" in str(e).lower() or "429" in str(e):
                 wait = (attempt + 1) * 3  # 3s, 6s, 9s backoff
                 print(f"Rate limit {yf_ticker} attempt {attempt+1}/3 — waiting {wait}s")
                 time.sleep(wait)
-                if attempt == 2:
-                    print(f"Download failed after 3 attempts: {yf_ticker}")
-                    return pd.DataFrame()
                 continue
             print(f"Download error {yf_ticker}: {e}")
             return pd.DataFrame()
-    return pd.DataFrame()  # exhausted retries
+
+    print(f"Download failed after 3 attempts: {yf_ticker}")
+    return pd.DataFrame()
 
 
 # ── EARNINGS FILTER ───────────────────────────────────────────────────────────
