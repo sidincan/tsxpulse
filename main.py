@@ -401,13 +401,13 @@ def compute_signal(stock: dict, idx: int = 0, total: int = 0) -> dict:
             print(f"PRICE OUTLIER {ticker} ({idx}/{total}): current=${current_price:.2f} vs 20d median=${recent_median:.2f} — skipping")
             return None
 
-        pq_score = 1 if (40 <= rsi_val <= 60 and current_price > float(sma50.iloc[-1])) else 0
+        pq_score = 1 if (35 <= rsi_val <= 65 and current_price > float(sma50.iloc[-1])) else 0
 
         # Signal 3: Volume + OBV
         vol_ratio = float(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1])
         obv       = ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume()
         obv_slope = float(obv.iloc[-1] - obv.iloc[-6])
-        vc_score  = 1 if (vol_ratio < 0.8 and obv_slope > 0) else 0
+        vc_score  = 1 if (vol_ratio > 0.8 and obv_slope > 0) else 0
 
         # ATR
         atr = float(ta.volatility.AverageTrueRange(
@@ -421,7 +421,7 @@ def compute_signal(stock: dict, idx: int = 0, total: int = 0) -> dict:
         # CMS Score — 4 core components + IMS (intraday momentum) as 5th
         cms_base  = round((tm_score * 0.35) + (pq_score * 0.25) + (vc_score * 0.15) + (adx_score * 0.15), 3)
         above_200 = current_price > float(sma200.iloc[-1])
-        confirm   = current_price > float(close.iloc[-2])
+        confirm   = current_price > float(close.iloc[-2])  # soft check — used in CMS bonus, not hard gate
 
         # IMS — session-aware intraday momentum scoring
         # During market hours (9:30-16:00 ET weekdays): use live today candles
@@ -517,16 +517,18 @@ def compute_signal(stock: dict, idx: int = 0, total: int = 0) -> dict:
 
         # Final CMS: 4 base components (80%) + IMS (20%)
         # IMS window narrowed to last 30 min (3:30-4:00 PM ET) for institutional quality
-        cms = round(cms_base * 0.80 + ims_score * 0.20, 3)
+        # confirm adds a small bonus — price above yesterday's close is a positive but
+        # not disqualifying on its own (pullback entries can still be valid)
+        confirm_bonus = 0.05 if confirm else 0.0
+        cms = round(cms_base * 0.80 + ims_score * 0.20 + confirm_bonus, 3)
 
         earnings_info = {"near_earnings": False, "earnings_date": None}
         if cms >= 0.60:
             earnings_info = is_near_earnings(ticker, market)
 
         entry_signal = (
-            cms >= 0.80
+            cms >= 0.75
             and above_200
-            and confirm
             and rsi_val < 70
             and adx_val >= 20          # trend must be directional, filters flat/choppy
             and not earnings_info["near_earnings"]
