@@ -566,7 +566,7 @@ def compute_signal(stock: dict, idx: int = 0, total: int = 0) -> dict:
             except Exception as gp_e:
                 print(f"Pre-market gap check skipped for {ticker}: {gp_e}")
 
-        stop = round(max(current_price - 2.0 * atr, current_price * 0.93), 2)
+        stop = round(max(current_price - 2.5 * atr, current_price * 0.90), 2)
 
         print(f"OK {ticker} ({idx}/{total}) price=${current_price:.2f} CMS={cms}")
 
