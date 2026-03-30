@@ -461,8 +461,16 @@ def compute_signal(stock: dict, idx: int = 0, total: int = 0) -> dict:
                         day_df = raw_intra[raw_intra.index.strftime("%Y-%m-%d") == today_str]
                         window = day_df[(day_df.index.hour > 9) |
                                         ((day_df.index.hour == 9) & (day_df.index.minute >= 30))]
-                        ims_session_label = "LIVE"
-                    else:
+                        # Minimum 6 candles (30 min) required for a meaningful live signal.
+                        # In the first 30 min after open there's too little data — fall back
+                        # to previous session close which is more reliable than 2-3 noisy candles.
+                        if len(window) >= 6:
+                            ims_session_label = "LIVE"
+                        else:
+                            # Not enough live candles yet — use prev session
+                            market_is_open = False
+
+                    if not market_is_open:
                         # ── PREV SESSION: last 30 min of most recent trading day ──
                         all_dates = sorted(set(raw_intra.index.strftime("%Y-%m-%d")))
                         prev_dates = [d for d in all_dates if d < today_str]
